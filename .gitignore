@@ -1,0 +1,7 @@
+node_modules/
+dist/
+deploy-mensajes.zip
+deploy-mensajes-src.zip
+.env
+.env.*
+*.log

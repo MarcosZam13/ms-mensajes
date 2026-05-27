@@ -1,0 +1,408 @@
+{
+  "info": {
+    "name": "Microservicio de Mensajes",
+    "description": "Colección de endpoints del microservicio de mensajería para la plataforma de arrendamientos de bienes raíces en Costa Rica. Incluye tests automáticos por endpoint.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "ms-mensajes"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{jwt_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://ms-mensajes.azurewebsites.net",
+      "type": "string",
+      "description": "Producción Azure. Para local usar http://localhost:3002"
+    },
+    {
+      "key": "jwt_token",
+      "value": "PEGAR_TOKEN_JWT_AQUI",
+      "type": "string",
+      "description": "Token JWT HS256 obtenido del MS Usuarios (/auth/login). Pegar el valor del campo 'token' de la respuesta."
+    },
+    {
+      "key": "conversacion_id",
+      "value": "",
+      "type": "string",
+      "description": "Se llena automáticamente al ejecutar 'Enviar Mensaje'"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Test: Verificar que el health check responde correctamente",
+              "pm.test('Status code es 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Respuesta contiene campos requeridos', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('status', 'ok');",
+              "  pm.expect(body).to.have.property('servicio', 'microservicio-mensajes');",
+              "});",
+              "",
+              "pm.test('Content-Type es application/json', function () {",
+              "  pm.response.to.have.header('Content-Type', 'application/json; charset=utf-8');",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        },
+        "description": "Health check del microservicio. No requiere autenticación."
+      }
+    },
+    {
+      "name": "Enviar Mensaje",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Test: Verificar envío exitoso de mensaje",
+              "pm.test('Status code es 201 Created', function () {",
+              "  pm.response.to.have.status(201);",
+              "});",
+              "",
+              "pm.test('Respuesta contiene datos del mensaje', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('mensaje', 'Mensaje enviado exitosamente');",
+              "  pm.expect(body.datos).to.have.property('mensaje_id');",
+              "  pm.expect(body.datos).to.have.property('conversacion_id');",
+              "  pm.expect(body.datos).to.have.property('destinatario_id');",
+              "  pm.expect(body.datos).to.have.property('contenido');",
+              "  pm.expect(body.datos).to.have.property('remitente_id');",
+              "  pm.expect(body.datos).to.have.property('remitente_nombre');",
+              "  pm.expect(body.datos).to.have.property('enviado_en');",
+              "  ",
+              "  // Guardar conversacion_id para usar en otros tests",
+              "  pm.collectionVariables.set('conversacion_id', body.datos.conversacion_id);",
+              "});",
+              "",
+              "pm.test('El mensaje_id no está vacío', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body.datos.mensaje_id).to.not.be.empty;",
+              "});",
+              "",
+              "pm.test('enviado_en es una fecha ISO válida', function () {",
+              "  const body = pm.response.json();",
+              "  const fecha = new Date(body.datos.enviado_en);",
+              "  pm.expect(fecha.toString()).to.not.equal('Invalid Date');",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"destinatario_id\": \"user-arrendatario-001\",\n  \"propiedad_id\": \"prop-001\",\n  \"contenido\": \"Hola, me interesa alquilar esta propiedad. ¿Sigue disponible para mayo?\",\n  \"arrendador_id\": \"user-arrendador-001\",\n  \"arrendatario_id\": \"user-arrendatario-001\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/mensajes",
+          "host": ["{{base_url}}"],
+          "path": ["api", "mensajes"]
+        },
+        "description": "Envía un nuevo mensaje en una conversación. Crea la conversación automáticamente si no existe. El remitente_id se extrae del JWT."
+      }
+    },
+    {
+      "name": "Enviar Mensaje - Validación (campos faltantes)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Test: Verificar que el endpoint rechaza request sin campos requeridos",
+              "pm.test('Status code es 400 Bad Request', function () {",
+              "  pm.response.to.have.status(400);",
+              "});",
+              "",
+              "pm.test('Respuesta contiene mensaje de error', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('error');",
+              "  pm.expect(body.error).to.include('Campos requeridos');",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"contenido\": \"Mensaje sin campos requeridos\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/mensajes",
+          "host": ["{{base_url}}"],
+          "path": ["api", "mensajes"]
+        },
+        "description": "Test de validación: envía un request sin los campos requeridos para verificar el manejo de errores."
+      }
+    },
+    {
+      "name": "Enviar Mensaje - Validación (sin auth)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Test: Verificar que el endpoint rechaza requests sin JWT",
+              "pm.test('Status code es 401 Unauthorized', function () {",
+              "  pm.response.to.have.status(401);",
+              "});",
+              "",
+              "pm.test('Respuesta contiene error de token', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('error');",
+              "  pm.expect(body.error).to.include('Token');",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"destinatario_id\": \"user-002\",\n  \"propiedad_id\": \"prop-001\",\n  \"contenido\": \"Este mensaje debería fallar por falta de JWT\",\n  \"arrendador_id\": \"user-001\",\n  \"arrendatario_id\": \"user-002\"\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/mensajes",
+          "host": ["{{base_url}}"],
+          "path": ["api", "mensajes"]
+        },
+        "description": "Test de seguridad: verifica que el endpoint rechace peticiones sin token JWT. Requiere quitar la auth de la colección o pasar un token inválido."
+      }
+    },
+    {
+      "name": "Listar Conversaciones",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Test: Verificar listado de conversaciones",
+              "pm.test('Status code es 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Respuesta tiene estructura paginada', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('pagina');",
+              "  pm.expect(body).to.have.property('limite');",
+              "  pm.expect(body).to.have.property('total');",
+              "  pm.expect(body).to.have.property('conversaciones');",
+              "  pm.expect(body.conversaciones).to.be.an('array');",
+              "});",
+              "",
+              "pm.test('Cada conversación tiene los campos requeridos', function () {",
+              "  const body = pm.response.json();",
+              "  if (body.conversaciones.length > 0) {",
+              "    const conv = body.conversaciones[0];",
+              "    pm.expect(conv).to.have.property('conversacion_id');",
+              "    pm.expect(conv).to.have.property('propiedad_id');",
+              "    pm.expect(conv).to.have.property('ultimo_mensaje');",
+              "    pm.expect(conv).to.have.property('no_leidos');",
+              "    pm.expect(conv.no_leidos).to.be.a('number');",
+              "  }",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/mensajes/conversaciones?pagina=1&limite=20",
+          "host": ["{{base_url}}"],
+          "path": ["api", "mensajes", "conversaciones"],
+          "query": [
+            { "key": "pagina", "value": "1" },
+            { "key": "limite", "value": "20" }
+          ]
+        },
+        "description": "Lista todas las conversaciones del usuario autenticado, con el último mensaje y conteo de no leídos."
+      }
+    },
+    {
+      "name": "Obtener Historial de Conversación",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Test: Verificar historial de mensajes",
+              "pm.test('Status code es 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Respuesta contiene mensajes paginados', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('conversacion_id');",
+              "  pm.expect(body).to.have.property('propiedad_id');",
+              "  pm.expect(body).to.have.property('pagina');",
+              "  pm.expect(body).to.have.property('total');",
+              "  pm.expect(body).to.have.property('mensajes');",
+              "  pm.expect(body.mensajes).to.be.an('array');",
+              "});",
+              "",
+              "pm.test('Cada mensaje tiene los campos requeridos', function () {",
+              "  const body = pm.response.json();",
+              "  if (body.mensajes.length > 0) {",
+              "    const msg = body.mensajes[0];",
+              "    pm.expect(msg).to.have.property('id');",
+              "    pm.expect(msg).to.have.property('remitente_id');",
+              "    pm.expect(msg).to.have.property('contenido');",
+              "    pm.expect(msg).to.have.property('leido');",
+              "    pm.expect(msg).to.have.property('enviado_en');",
+              "    pm.expect(msg.leido).to.be.a('boolean');",
+              "  }",
+              "});",
+              "",
+              "pm.test('Los mensajes están ordenados cronológicamente', function () {",
+              "  const body = pm.response.json();",
+              "  if (body.mensajes.length > 1) {",
+              "    for (let i = 1; i < body.mensajes.length; i++) {",
+              "      const anterior = new Date(body.mensajes[i - 1].enviado_en);",
+              "      const actual = new Date(body.mensajes[i].enviado_en);",
+              "      pm.expect(anterior <= actual).to.be.true;",
+              "    }",
+              "  }",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/mensajes/conversaciones/{{conversacion_id}}/mensajes?pagina=1&limite=50",
+          "host": ["{{base_url}}"],
+          "path": ["api", "mensajes", "conversaciones", "{{conversacion_id}}", "mensajes"],
+          "query": [
+            { "key": "pagina", "value": "1" },
+            { "key": "limite", "value": "50" }
+          ]
+        },
+        "description": "Obtiene el historial paginado de mensajes de una conversación específica. Los mensajes se retornan en orden cronológico (más antiguos primero)."
+      }
+    },
+    {
+      "name": "Marcar Mensajes como Leídos",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Test: Verificar que se marcan mensajes como leídos",
+              "pm.test('Status code es 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test('Respuesta confirma la operación', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('mensaje', 'Mensajes marcados como leídos');",
+              "  pm.expect(body.datos).to.have.property('conversacion_id');",
+              "  pm.expect(body.datos).to.have.property('mensajes_actualizados');",
+              "  pm.expect(body.datos.mensajes_actualizados).to.be.a('number');",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "PATCH",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/mensajes/conversaciones/{{conversacion_id}}/leido",
+          "host": ["{{base_url}}"],
+          "path": ["api", "mensajes", "conversaciones", "{{conversacion_id}}", "leido"]
+        },
+        "description": "Marca como leídos todos los mensajes de la conversación que fueron enviados por el otro participante."
+      }
+    },
+    {
+      "name": "Historial - Conversación inexistente",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "// Test: Verificar 404 para conversación que no existe",
+              "pm.test('Status code es 404', function () {",
+              "  pm.response.to.have.status(404);",
+              "});",
+              "",
+              "pm.test('Mensaje de error adecuado', function () {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body).to.have.property('error');",
+              "  pm.expect(body.error).to.include('Conversación no encontrada');",
+              "});"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/mensajes/conversaciones/000000000000000000000000/mensajes",
+          "host": ["{{base_url}}"],
+          "path": ["api", "mensajes", "conversaciones", "000000000000000000000000", "mensajes"]
+        },
+        "description": "Test de error: intenta obtener el historial de una conversación que no existe (ID inválido de 24 caracteres)."
+      }
+    }
+  ]
+}
