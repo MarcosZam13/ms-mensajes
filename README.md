@@ -1,276 +1,562 @@
-# Microservicio de Mensajes
+# Microservicio de Mensajes (`ms-mensajes`)
 
-Microservicio de mensajería en tiempo real para plataforma de arrendamientos de bienes raíces en Costa Rica. Permite la comunicación entre arrendadores y arrendatarios, publica eventos en Azure Service Bus y entrega actualizaciones en tiempo real vía WebSocket (Socket.io).
+Servicio de mensajería en tiempo real para la plataforma de arrendamientos de bienes raíces en Costa Rica. Gestiona conversaciones entre arrendadores y arrendatarios, persiste mensajes en Azure Cosmos DB (API MongoDB) y distribuye eventos al microservicio de notificaciones vía Azure Service Bus.
 
-**Desplegado en:** `https://ms-mensajes.azurewebsites.net`
-**Swagger UI:** `https://ms-mensajes.azurewebsites.net/docs/`
-
----
-
-## Stack Tecnológico
-
-| Componente       | Tecnología                          |
-| ---------------- | ----------------------------------- |
-| Runtime          | Node.js 22 LTS + TypeScript 5.5     |
-| Framework HTTP   | Express 4                           |
-| Base de datos    | Azure Cosmos DB (API MongoDB)       |
-| ODM              | Mongoose 8                          |
-| Mensajería       | Azure Service Bus (Topics)          |
-| Tiempo real      | Socket.io 4 (WebSocket)             |
-| Autenticación    | JWT HS256 (shared secret)           |
-| Documentación    | Swagger UI (swagger-ui-express)     |
-| Despliegue       | Azure App Service — ZIP deploy      |
-| CI/CD            | GitHub Actions                      |
+**Desplegado en:** `https://ms-mensajes.azurewebsites.net`  
+**Repositorio:** `https://github.com/MarcosZam13/ms-mensajes`  
+**Runtime:** Node.js 22 · TypeScript · Express · Socket.io 4
 
 ---
 
-## Arquitectura
+## Tabla de contenidos
 
-El proyecto sigue una arquitectura limpia en capas (domain → application → infrastructure → interfaces):
+1. [Arquitectura interna](#1-arquitectura-interna)
+2. [Endpoints REST](#2-endpoints-rest)
+3. [WebSocket (Socket.io)](#3-websocket-socketio)
+4. [Modelos de datos](#4-modelos-de-datos)
+5. [Flujo completo de un mensaje](#5-flujo-completo-de-un-mensaje)
+6. [Variables de entorno](#6-variables-de-entorno)
+7. [Ejecutar localmente](#7-ejecutar-localmente)
+8. [CI/CD — GitHub Actions](#8-cicd--github-actions)
+9. [Seguridad](#9-seguridad)
+10. [Estructura del proyecto](#10-estructura-del-proyecto)
+
+---
+
+## 1. Arquitectura interna
+
+El microservicio sigue **arquitectura hexagonal** (puertos y adaptadores):
 
 ```
-src/
-├── domain/              # Entidades e interfaces (puertos)
-│   ├── entities/        # Conversacion, Mensaje
-│   └── interfaces/      # IConversacionRepository, IMensajeRepository, IServiceBusPublisher
-├── application/         # Casos de uso (lógica de negocio)
-│   └── use-cases/       # EnviarMensaje, ObtenerHistorico, ListarConversaciones, MarcarLeidos
-├── infrastructure/      # Implementaciones concretas (adaptadores)
-│   ├── database/        # Modelos Mongoose, repositorios, conexión Cosmos DB
-│   ├── messaging/       # ServiceBusPublisher (opcional — no-op si no hay connection string)
-│   ├── swagger/         # swaggerSpec.ts — especificación OpenAPI 3.0
-│   ├── websocket/       # Socket.io setup (salas por usuario)
-│   └── middleware/      # jwtMiddleware (HS256), errorHandler
-├── interfaces/          # Adaptadores de entrada HTTP
-│   ├── controllers/     # MensajesController
-│   └── routes/          # mensajesRoutes — definición de endpoints
-├── config/              # Configuración centralizada de variables de entorno
-└── index.ts             # Punto de entrada — DI manual, inicialización
+┌─────────────────────────────────────────────────────────┐
+│                    INTERFACES (HTTP / WS)                │
+│  MensajesController  ←→  mensajesRoutes                  │
+│  middlewareJWT            socketSetup (Socket.io)        │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│                   APPLICATION (casos de uso)             │
+│  EnviarMensaje  ObtenerHistorico                         │
+│  ListarConversaciones  MarcarLeidos                      │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│                     DOMAIN (entidades)                   │
+│  Conversacion  Mensaje                                   │
+│  IConversacionRepository  IMensajeRepository             │
+│  IServiceBusPublisher                                    │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│               INFRASTRUCTURE (adaptadores)               │
+│  MongoConversacionRepository  MongoMensajeRepository     │
+│  ServiceBusPublisher  socketSetup  errorHandler          │
+└─────────────────────────────────────────────────────────┘
 ```
+
+**Dependencias externas:**
+- **Azure Cosmos DB (API MongoDB)** — persistencia de conversaciones y mensajes
+- **Azure Service Bus** — publica eventos `nuevo_mensaje` para ms-notificaciones
+- **Socket.io 4** — canal WebSocket para mensajes en tiempo real al destinatario
 
 ---
 
-## Variables de entorno
+## 2. Endpoints REST
 
-Copia `.env.example` a `.env` y configura los valores:
-
-```bash
-cp .env.example .env
+Todas las rutas (excepto `/health`) requieren el header:
+```
+Authorization: Bearer <JWT>
 ```
 
-| Variable                        | Requerida | Descripción                                                          |
-| ------------------------------- | --------- | -------------------------------------------------------------------- |
-| `PORT`                          | No        | Puerto HTTP (default: `3002`)                                        |
-| `NODE_ENV`                      | No        | `development` o `production` (default: `development`)                |
-| `MONGODB_URI`                   | **Sí**    | Connection string a Azure Cosmos DB (API MongoDB)                    |
-| `JWT_SECRET`                    | **Sí**    | Secret compartido con MS Usuarios para validar tokens HS256          |
-| `SERVICE_BUS_CONNECTION_STRING` | No        | Connection string de `arrendamientos-sb1`. Si está vacía, los eventos se omiten silenciosamente. |
-| `SERVICE_BUS_TOPIC_NAME`        | No        | Nombre del topic (default: `mensajes-eventos`)                       |
-| `JWT_AUDIENCE`                  | No        | Audiencia esperada en el JWT (opcional)                              |
-| `JWT_ISSUER`                    | No        | Emisor esperado en el JWT (opcional)                                 |
-| `CORS_ORIGIN`                   | No        | Origen CORS permitido (default: `http://localhost:5173`)             |
-| `LOG_LEVEL`                     | No        | Nivel de log: `debug`, `info`, `warn`, `error` (default: `info`)    |
+El JWT es validado con HS256 + `JWT_SECRET`. El `user_id` se extrae del claim `sub` del token; **nunca** se acepta del body o query params.
 
 ---
 
-## Instalación y ejecución local
+### `POST /api/mensajes`
 
-```bash
-# Instalar dependencias
-npm install
+Envía un mensaje en una conversación. Crea la conversación automáticamente si no existe (idempotente: una sola conversación por propiedad + par de usuarios).
 
-# Ejecutar en modo desarrollo (hot reload)
-npm run dev
-
-# Verificar tipos TypeScript
-npm run typecheck
-
-# Compilar TypeScript → dist/
-npm run build
-
-# Ejecutar build compilado
-npm start
-```
-
-El servicio estará disponible en:
-- API: http://localhost:3002
-- Health check: http://localhost:3002/health
-- Swagger UI: http://localhost:3002/docs/
-- Spec JSON: http://localhost:3002/docs.json
-
----
-
-## Endpoints API
-
-Todas las rutas bajo `/api/mensajes` (excepto `/health`) requieren JWT en el header `Authorization: Bearer <token>`.
-
-| Método  | Ruta                                                  | Auth | Descripción                         |
-| ------- | ----------------------------------------------------- | ---- | ----------------------------------- |
-| `GET`   | `/health`                                             | No   | Health check del servicio           |
-| `GET`   | `/docs/`                                              | No   | Swagger UI interactivo              |
-| `GET`   | `/docs.json`                                          | No   | Especificación OpenAPI 3.0 (JSON)   |
-| `POST`  | `/api/mensajes`                                       | Sí   | Enviar un nuevo mensaje             |
-| `GET`   | `/api/mensajes/conversaciones`                        | Sí   | Listar conversaciones del usuario   |
-| `GET`   | `/api/mensajes/conversaciones/:id/mensajes`           | Sí   | Obtener historial de conversación   |
-| `PATCH` | `/api/mensajes/conversaciones/:id/leido`              | Sí   | Marcar mensajes como leídos         |
-
-### Ejemplo: Enviar mensaje
-
-```http
-POST /api/mensajes
-Authorization: Bearer <jwt-token>
-Content-Type: application/json
-
+**Body:**
+```json
 {
-  "destinatario_id": "user-456",
-  "propiedad_id": "prop-789",
-  "contenido": "Hola, me interesa esta propiedad. ¿Sigue disponible?",
-  "arrendador_id": "user-123",
-  "arrendatario_id": "user-456"
+  "destinatario_id": "string",
+  "propiedad_id":    "string",
+  "contenido":       "string (1–5000 chars)",
+  "arrendador_id":   "string",
+  "arrendatario_id": "string"
 }
 ```
 
-**Respuesta (201):**
+**Validaciones:**
+- Todos los campos deben ser `string` no vacío (protección contra inyección NoSQL)
+- `contenido` entre 1 y 5000 caracteres (trimmed)
+- El remitente (del JWT) debe ser igual a `arrendador_id` **o** `arrendatario_id`
+- El remitente no puede coincidir con `destinatario_id` (no mensajes a sí mismo)
+
+**Respuesta 201:**
 ```json
 {
   "mensaje": "Mensaje enviado exitosamente",
   "datos": {
-    "mensaje_id": "66a1f3c2e4b09d2e1a3f9001",
-    "conversacion_id": "66a1f3c2e4b09d2e1a3f8fff",
-    "destinatario_id": "user-456",
-    "contenido": "Hola, me interesa esta propiedad. ¿Sigue disponible?",
-    "remitente_id": "user-123",
-    "remitente_nombre": "Carlos Pérez",
-    "enviado_en": "2026-05-20T22:00:00.000Z"
+    "mensaje_id":       "string",
+    "conversacion_id":  "string",
+    "destinatario_id":  "string",
+    "remitente_id":     "string",
+    "remitente_nombre": "string",
+    "contenido":        "string",
+    "enviado_en":       "ISO 8601"
+  }
+}
+```
+
+**Efectos secundarios (asíncronos, no bloquean la respuesta):**
+1. Emite evento `nuevo_mensaje` por Socket.io al destinatario (si está conectado)
+2. Publica evento en Azure Service Bus → ms-notificaciones lo consume
+
+---
+
+### `GET /api/mensajes/conversaciones`
+
+Lista las conversaciones del usuario autenticado con el último mensaje y conteo de no leídos.
+
+**Query params:**
+
+| Param    | Default | Máximo |
+|----------|---------|--------|
+| `pagina` | `1`     | —      |
+| `limite` | `20`    | `50`   |
+
+**Respuesta 200:**
+```json
+{
+  "pagina": 1,
+  "limite": 20,
+  "total": 3,
+  "conversaciones": [
+    {
+      "conversacion_id":   "string",
+      "propiedad_id":      "string",
+      "arrendador_id":     "string",
+      "arrendatario_id":   "string",
+      "ultimo_mensaje":    "Hola, ¿sigue disponible?",
+      "ultimo_enviado_en": "2026-05-27T14:30:00.000Z",
+      "no_leidos":         2,
+      "creado_en":         "2026-05-20T10:00:00.000Z"
+    }
+  ]
+}
+```
+
+---
+
+### `GET /api/mensajes/conversaciones/:conversacion_id/mensajes`
+
+Historial paginado de mensajes de una conversación. Verifica que el usuario autenticado sea participante antes de devolver datos.
+
+**Query params:**
+
+| Param    | Default | Máximo |
+|----------|---------|--------|
+| `pagina` | `1`     | —      |
+| `limite` | `50`    | `100`  |
+
+**Respuesta 200:**
+```json
+{
+  "conversacion_id": "string",
+  "propiedad_id":    "string",
+  "pagina":          1,
+  "limite":          50,
+  "total":           42,
+  "mensajes": [
+    {
+      "id":           "string",
+      "remitente_id": "string",
+      "contenido":    "string",
+      "leido":        false,
+      "enviado_en":   "ISO 8601"
+    }
+  ]
+}
+```
+
+---
+
+### `PATCH /api/mensajes/conversaciones/:conversacion_id/leido`
+
+Marca como leídos todos los mensajes **del otro participante** en la conversación (los que aún no ha leído el usuario autenticado).
+
+**Respuesta 200:**
+```json
+{
+  "mensaje": "Mensajes marcados como leídos",
+  "datos": {
+    "conversacion_id":       "string",
+    "mensajes_actualizados": 3
   }
 }
 ```
 
 ---
 
-## Autenticación (JWT HS256)
+### `GET /health`
 
-El token JWT es emitido por el **MS Usuarios** con algoritmo **HS256** y un secret compartido. El MS Mensajes lo valida y extrae el `user_id` del claim `sub`.
-
-El `user_id` **nunca** se recibe del body de la petición — siempre se extrae del token firmado. Esto impide que un usuario suplante a otro.
-
-```
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
-```
-
----
-
-## WebSocket (Socket.io)
-
-El servidor expone WebSocket en la misma URL base. El cliente se suscribe a eventos en tiempo real:
-
-```javascript
-import { io } from 'socket.io-client';
-
-const socket = io('wss://ms-mensajes.azurewebsites.net', {
-  transports: ['websocket'],
-});
-
-// Registrar el user_id para recibir mensajes en tiempo real
-socket.emit('autenticar', 'user-456');
-
-// Escuchar nuevos mensajes
-socket.on('nuevo_mensaje', (data) => {
-  console.log('Mensaje recibido:', data);
-  // data = { mensaje_id, conversacion_id, remitente_id, remitente_nombre, contenido, enviado_en }
-});
-```
-
-El servidor agrupa conexiones en salas `usuario:{user_id}` — cada usuario solo recibe sus propios mensajes.
-
----
-
-## Eventos de Azure Service Bus
-
-Al enviar un mensaje exitosamente, el MS Mensajes publica un evento en el topic configurado. Este evento es consumido por el MS Notificaciones para generar la notificación correspondiente.
+Health check sin autenticación. Útil para Azure App Service health probes y APIM.
 
 ```json
 {
-  "tipo": "nuevo_mensaje",
-  "destinatario_id": "user-456",
-  "remitente_nombre": "Carlos Pérez",
-  "propiedad_id": "prop-789",
-  "preview": "Hola, me interesa esta propiedad...",
-  "conversacion_id": "66a1f3c2e4b09d2e1a3f8fff"
+  "servicio":  "microservicio-mensajes",
+  "version":   "1.0.0",
+  "status":    "healthy",
+  "timestamp": "ISO 8601"
 }
 ```
 
-El Service Bus `arrendamientos-sb1` está activo en producción. Si `SERVICE_BUS_CONNECTION_STRING` no está configurada en entornos locales, la publicación se omite silenciosamente (el mensaje se guarda igualmente en Cosmos DB y se entrega por WebSocket).
+---
+
+### Códigos de error comunes
+
+| Código | Causa                                                    |
+|--------|----------------------------------------------------------|
+| `400`  | Campo inválido, no-string, vacío o excede longitud       |
+| `401`  | Token JWT ausente, expirado o inválido                   |
+| `403`  | El usuario no participa en la conversación               |
+| `404`  | Conversación no encontrada                               |
+| `500`  | Error interno (ver logs de Azure App Service)            |
 
 ---
 
-## Despliegue en Azure App Service
+## 3. WebSocket (Socket.io)
 
-El servicio está desplegado como **ZIP deploy** en `ms-mensajes.azurewebsites.net`.
+El servidor Socket.io corre en la misma URL HTTP del servicio (mismo puerto).
 
-### Despliegue manual (ZIP)
+### Conexión y autenticación
 
-```bash
-# 1. Instalar dependencias y compilar TypeScript
-npm install
-npm run build
+El JWT se pasa en el **handshake** de Socket.io (`auth.token`). El servidor lo valida en un middleware `io.use()` **antes** de que la conexión sea aceptada.
 
-# 2. Eliminar devDependencies
-npm prune --production
+```javascript
+// Ejemplo de conexión (frontend)
+import { io } from 'socket.io-client';
 
-# 3. Crear ZIP (dist/ + node_modules/ + package.json)
-python3 -c "
-import zipfile, os
-with zipfile.ZipFile('deploy.zip', 'w', zipfile.ZIP_DEFLATED) as zf:
-    for folder in ['dist', 'node_modules']:
-        for root, dirs, files in os.walk(folder):
-            for file in files:
-                full = os.path.join(root, file)
-                zf.write(full, os.path.relpath(full))
-    zf.write('package.json', 'package.json')
-"
-
-# 4. Desplegar
-az webapp deploy \
-  --resource-group JosephResourceGroup \
-  --name ms-mensajes \
-  --src-path deploy.zip \
-  --type zip
+const socket = io('https://ms-mensajes.azurewebsites.net', {
+  transports: ['websocket'],
+  auth: { token: jwtToken },  // JWT validado por io.use() en el servidor
+  reconnectionAttempts: 5,
+  reconnectionDelay: 2000,
+});
 ```
 
-El startup command configurado en Azure es: `node dist/index.js`
-
-### Variables de entorno en Azure
-
-Configuradas en Azure Portal → `ms-mensajes` → Configuration → Application settings:
-
-| Variable | Valor en producción |
-|---|---|
-| `MONGODB_URI` | Connection string de `mongoclusterjoseph` |
-| `MONGODB_DB_NAME` | `mensajes_db` |
-| `JWT_SECRET` | `secret_seguro_aqui_123456789` |
-| `SERVICE_BUS_TOPIC_NAME` | `mensajes-eventos` |
-| `CORS_ORIGIN` | URL del frontend estático |
-| `WEBSITES_PORT` | `3002` |
-| `SERVICE_BUS_CONNECTION_STRING` | `Endpoint=sb://arrendamientos-sb1.servicebus.windows.net/;...` ✅ Configurada |
+Si el token es inválido, la conexión es rechazada con código de error `TOKEN_INVALIDO` antes de que se dispare ningún evento.
 
 ---
 
-## GitHub Actions CI/CD
+### Eventos cliente → servidor
 
-El workflow en `.github/workflows/deploy.yml` se activa al hacer push a `main`.
+| Evento       | Payload          | Descripción                                                                             |
+|--------------|------------------|-----------------------------------------------------------------------------------------|
+| `autenticar` | `userId: string` | Solicita unirse a la sala privada. El servidor **ignora** el userId del evento y usa el del JWT. |
 
-**Pasos del pipeline:**
-1. `npm ci` — instala dependencias exactas del lock file
-2. `tsc --noEmit` — verifica tipos sin generar archivos
-3. `eslint` — verifica estilo de código
-4. `npm run build` — compila TypeScript → `dist/`
-5. ZIP deploy a Azure App Service
+---
 
-### Secrets requeridos en GitHub
+### Eventos servidor → cliente
 
-| Secret | Descripción |
-| ------ | ----------- |
-| `AZURE_WEBAPP_PUBLISH_PROFILE` | Publish profile del App Service `ms-mensajes` (descargar desde Azure Portal → ms-mensajes → Get publish profile) |
+| Evento          | Payload                                                                                       | Descripción                        |
+|-----------------|-----------------------------------------------------------------------------------------------|------------------------------------|
+| `autenticado`   | `{ mensaje: string }`                                                                         | Confirmación: sala unida           |
+| `nuevo_mensaje` | `{ mensaje_id, conversacion_id, remitente_id, remitente_nombre, contenido, enviado_en }`      | Mensaje entrante en tiempo real    |
+| `error`         | `{ mensaje: string }`                                                                         | Error del servidor                 |
 
-> **Pendiente:** actualizar el workflow de Docker/ACR a ZIP deploy. Ver ROADMAP.md para el YAML actualizado.
+---
+
+### Flujo de conexión
+
+```
+Cliente                                   Servidor
+  │                                           │
+  │── io(URL, { auth: { token } }) ──────────►│
+  │                                           │
+  │                              [io.use middleware]
+  │                                           │── jwt.verify(token, secret)
+  │                                           │   OK → socket.data.userId = sub
+  │                                           │   FAIL → next(Error('TOKEN_INVALIDO'))
+  │                                           │
+  │◄── socket.id asignado ───────────────────│ (conexión aceptada)
+  │                                           │
+  │── emit('autenticar', userId) ────────────►│
+  │                              [ignorar userId del evento]
+  │                                           │── socket.join(`usuario:${socket.data.userId}`)
+  │◄── emit('autenticado') ──────────────────│
+  │                                           │
+  │                   [otro usuario envía mensaje]
+  │◄── emit('nuevo_mensaje', payload) ───────│ io.to(`usuario:${destinatario_id}`)
+```
+
+---
+
+### Multi-dispositivo
+
+Un usuario puede tener múltiples conexiones activas (distintos dispositivos/pestañas). El servidor usa un `Map<userId, Set<socketId>>` para rastrearlas. Cuando se desconecta un socket, se elimina del set; si el set queda vacío, se elimina la entrada del mapa.
+
+---
+
+## 4. Modelos de datos
+
+### Colección `conversaciones`
+
+| Campo             | Tipo     | Descripción                                      |
+|-------------------|----------|--------------------------------------------------|
+| `_id`             | ObjectId | Generado por Cosmos DB                           |
+| `propiedad_id`    | string   | ID de la propiedad asociada                      |
+| `arrendador_id`   | string   | ID del usuario arrendador                        |
+| `arrendatario_id` | string   | ID del usuario arrendatario                      |
+| `creado_en`       | Date     | Fecha de creación                                |
+
+**Índices:**
+- `{ propiedad_id, arrendador_id, arrendatario_id }` — **único compuesto** (máximo una conversación por propiedad + par de usuarios)
+- `{ arrendador_id, creado_en: -1 }` — listado de conversaciones del arrendador
+- `{ arrendatario_id, creado_en: -1 }` — listado de conversaciones del arrendatario
+
+---
+
+### Colección `mensajes`
+
+| Campo             | Tipo     | Descripción                            |
+|-------------------|----------|----------------------------------------|
+| `_id`             | ObjectId | Generado por Cosmos DB                 |
+| `conversacion_id` | string   | FK → `conversaciones._id`             |
+| `remitente_id`    | string   | ID del usuario que envió el mensaje    |
+| `contenido`       | string   | Texto del mensaje (máx. 5000 chars)    |
+| `leido`           | boolean  | `false` hasta que el destinatario lo marque como leído |
+| `enviado_en`      | Date     | Timestamp de envío                     |
+
+**Índices:**
+- `{ conversacion_id, enviado_en: -1 }` — historial paginado ordenado descendentemente
+- `{ conversacion_id, remitente_id, leido }` — marcar mensajes no leídos eficientemente
+
+---
+
+## 5. Flujo completo de un mensaje
+
+```
+Frontend (remitente)
+  │
+  │  POST /api/mensajes
+  │  Body: { destinatario_id, propiedad_id, contenido, arrendador_id, arrendatario_id }
+  │  Authorization: Bearer <JWT>
+  ▼
+middlewareJWT
+  │── Valida firma + expiración del JWT (HS256)
+  │── Extrae remitente_id = claims.sub
+  ▼
+MensajesController.enviar()
+  │── Valida tipos (todos string, sin objetos MongoDB)
+  │── Valida que remitente ∈ { arrendador_id, arrendatario_id }
+  │── Valida que remitente ≠ destinatario
+  ▼
+EnviarMensaje.ejecutar()
+  │── conversacionRepo.encontrarOCrear(propiedad_id, arrendador_id, arrendatario_id)
+  │   → Upsert con índice único → idempotente
+  │── mensajeRepo.guardar({ conversacion_id, remitente_id, contenido })
+  │── destinatario_id = conversacion.otroParticipante(remitente_id)
+  │   → Derivado del servidor, no del body del cliente
+  │
+  │── serviceBusPublisher.publicarEvento({       ← FIRE & FORGET (no bloquea respuesta)
+  │     tipo: 'nuevo_mensaje',
+  │     destinatario_id,
+  │     remitente_nombre,
+  │     propiedad_id,
+  │     preview,
+  │     conversacion_id
+  │   })
+  ▼
+MensajesController (continúa)
+  │── emitirNuevoMensaje(resultado.destinatario_id, payload)  ← WebSocket inmediato
+  │   io.to(`usuario:${destinatario_id}`).emit('nuevo_mensaje', ...)
+  │── res.status(201).json(resultado)
+  ▼
+Frontend (destinatario, si conectado por WebSocket)
+  │◄── evento 'nuevo_mensaje' llega en tiempo real
+  ▼
+Azure Service Bus (topic: mensajes-eventos)
+  │── MS Notificaciones consume el evento
+  │── Persiste notificación en Cosmos DB
+  │── Emite notificación por WebSocket nativo (/ws/{userId})
+  │── Envía push notification FCM (si hay token registrado)
+```
+
+---
+
+## 6. Variables de entorno
+
+Crear `.env` en la raíz del proyecto (no commitear, ya está en `.gitignore`):
+
+```env
+# ── Servidor ─────────────────────────────────────────────
+PORT=3002
+NODE_ENV=development
+
+# ── Base de datos ─────────────────────────────────────────
+MONGODB_URI=mongodb+srv://<usuario>:<clave>@<cuenta>.mongo.cosmos.azure.com/?ssl=true&retrywrites=false
+
+# ── JWT ───────────────────────────────────────────────────
+JWT_SECRET=cambiar-por-clave-segura-min-32-caracteres
+# JWT_AUDIENCE=           # opcional
+# JWT_ISSUER=             # opcional
+
+# ── Azure Service Bus ─────────────────────────────────────
+SERVICE_BUS_CONNECTION_STRING=Endpoint=sb://<namespace>.servicebus.windows.net/;SharedAccessKeyName=...;SharedAccessKey=...
+SERVICE_BUS_TOPIC_NAME=mensajes-eventos
+
+# ── CORS ──────────────────────────────────────────────────
+CORS_ORIGIN=https://agreeable-ground-0b1436910.6.azurestaticapps.net
+```
+
+| Variable                         | Requerida | Default               | Descripción                                   |
+|----------------------------------|-----------|-----------------------|-----------------------------------------------|
+| `MONGODB_URI`                    | ✅        | —                     | Cadena de conexión Cosmos DB (API MongoDB)     |
+| `JWT_SECRET`                     | ✅        | —                     | Secreto HS256 compartido con MS Usuarios       |
+| `SERVICE_BUS_CONNECTION_STRING`  | ⬜        | —                     | Si falta, los eventos a notificaciones se omiten silenciosamente |
+| `SERVICE_BUS_TOPIC_NAME`         | ⬜        | `mensajes-eventos`    | Topic de Azure Service Bus                    |
+| `CORS_ORIGIN`                    | ⬜        | `http://localhost:5173` | Origen permitido por CORS                   |
+| `PORT`                           | ⬜        | `3002`                | Puerto del servidor HTTP                      |
+| `JWT_AUDIENCE`                   | ⬜        | —                     | Validar claim `aud` del JWT                   |
+| `JWT_ISSUER`                     | ⬜        | —                     | Validar claim `iss` del JWT                   |
+
+---
+
+## 7. Ejecutar localmente
+
+```bash
+# 1. Instalar dependencias
+npm install
+
+# 2. Configurar variables de entorno
+cp .env.example .env
+# Editar .env con los valores correctos
+
+# 3. Desarrollo con hot-reload
+npm run dev
+
+# 4. Compilar y ejecutar build de producción
+npm run build
+npm start
+```
+
+**Endpoints disponibles localmente:**
+- API REST: `http://localhost:3002/api/mensajes`
+- Swagger UI: `http://localhost:3002/docs`
+- Health check: `http://localhost:3002/health`
+- WebSocket: `ws://localhost:3002`
+
+---
+
+## 8. CI/CD — GitHub Actions
+
+El workflow `.github/workflows/deploy.yml` se activa automáticamente en cada `git push` a la rama `main`.
+
+**Pasos del workflow:**
+
+```
+1. Checkout           actions/checkout@v4
+2. Setup Node.js 22   actions/setup-node@v4 (con caché npm)
+3. npm ci             instala dependencias exactas del lockfile
+4. npm run build      compila TypeScript → dist/
+5. zip deploy.zip     empaqueta dist/ + package.json + package-lock.json
+6. curl Kudu API      POST /api/zipdeploy → Azure App Service
+```
+
+**Secrets requeridos en GitHub (Settings → Secrets → Actions):**
+
+| Secret                    | Valor                        |
+|---------------------------|------------------------------|
+| `KUDU_USER_MS_MENSAJES`   | `$ms-mensajes` (literal con `$`) |
+| `KUDU_PASS_MS_MENSAJES`   | Contraseña del perfil de publicación de Azure |
+
+> **¿Por qué dos secrets?** El usuario de Azure siempre empieza con `$`. Al almacenarlo como un único secret `$usuario:contraseña` y usarlo en bash (`-u "$CRED"`), bash lo expande silenciosamente a `:contraseña` → HTTP 401. Al separarlos, bash expande `${KUDU_USER}` como variable de entorno, no como expansión de `$` en el valor.
+
+---
+
+## 9. Seguridad
+
+### Autenticación JWT (endpoints HTTP)
+- Middleware `jwtMiddleware` valida firma + expiración en cada request protegido.
+- `userId` extraído exclusivamente del claim `sub` del JWT verificado.
+- Soporta claims alternativos: `oid`, `user_id`, `id` (compatibilidad con distintos emisores).
+
+### Autenticación JWT (WebSocket)
+- Middleware `io.use()` valida el JWT en el **handshake** (antes de aceptar la conexión).
+- Conexiones sin token → rechazadas con `TOKEN_REQUERIDO`.
+- Conexiones con token inválido/expirado → rechazadas con `TOKEN_INVALIDO`.
+- El evento `autenticar` del cliente es ignorado en su campo de userId; siempre se usa `socket.data.userId` (del token).
+
+### Protección contra inyección NoSQL
+- Todos los campos de `req.body` son validados como `typeof valor === 'string'` antes de llegar a los repositorios.
+- Impide ataques como `{ "$gt": "" }` en campos esperados como string.
+
+### Autorización por conversación
+- `ObtenerHistorico` y `MarcarLeidos` verifican `conversacion.participa(userId)` antes de retornar datos.
+- Si el usuario no participa, devuelven `403` sin revelar si la conversación existe.
+
+### Emisión WebSocket sin IDOR
+- `emitirNuevoMensaje` recibe `resultado.destinatario_id` (derivado por el servidor de la conversación persistida), **no** el `destinatario_id` del body del cliente. Un cliente malicioso no puede dirigir eventos a otro usuario.
+
+### Tamaño de payload
+- `express.json({ limit: '10kb' })` rechaza bodies superiores a 10 KB.
+
+---
+
+## 10. Estructura del proyecto
+
+```
+ms-mensajes/
+├── src/
+│   ├── config/
+│   │   └── index.ts                       # Variables de entorno + validación al inicio
+│   ├── domain/                            # Núcleo del negocio — sin dependencias externas
+│   │   ├── entities/
+│   │   │   ├── Conversacion.ts            # participa(), otroParticipante()
+│   │   │   └── Mensaje.ts                 # marcarLeido()
+│   │   └── interfaces/
+│   │       ├── IConversacionRepository.ts # Puerto: encontrarOCrear, obtenerPorId, listarPorUsuario
+│   │       ├── IMensajeRepository.ts      # Puerto: guardar, obtenerPorConversacion, marcarLeidos
+│   │       └── IServiceBusPublisher.ts    # Puerto: publicarEvento
+│   ├── application/                       # Casos de uso — orquestan dominio e infraestructura
+│   │   └── use-cases/
+│   │       ├── EnviarMensaje.ts           # Conversa + mensaje + Service Bus + WS
+│   │       ├── ObtenerHistorico.ts        # Historial paginado con autorización
+│   │       ├── ListarConversaciones.ts    # Lista conversaciones del usuario
+│   │       └── MarcarLeidos.ts            # Marca mensajes del otro participante como leídos
+│   ├── infrastructure/                    # Adaptadores — implementan los puertos del dominio
+│   │   ├── database/
+│   │   │   ├── connection.ts              # Mongoose → Cosmos DB
+│   │   │   ├── models/
+│   │   │   │   ├── ConversacionModel.ts   # Schema Mongoose + índices únicos
+│   │   │   │   └── MensajeModel.ts        # Schema Mongoose + índices de historial
+│   │   │   └── repositories/
+│   │   │       ├── MongoConversacionRepository.ts  # Implementa IConversacionRepository
+│   │   │       └── MongoMensajeRepository.ts       # Implementa IMensajeRepository
+│   │   ├── messaging/
+│   │   │   └── ServiceBusPublisher.ts     # Implementa IServiceBusPublisher — Azure SDK
+│   │   ├── middleware/
+│   │   │   ├── jwtMiddleware.ts           # Valida JWT HS256 en requests HTTP
+│   │   │   └── errorHandler.ts            # Manejo centralizado + formato consistente de errores
+│   │   ├── swagger/
+│   │   │   └── swaggerSpec.ts             # Especificación OpenAPI 3.0
+│   │   └── websocket/
+│   │       └── socketSetup.ts             # Socket.io: middleware JWT + salas + emisión
+│   ├── interfaces/                        # Adaptadores de entrada — HTTP y WebSocket
+│   │   ├── controllers/
+│   │   │   └── MensajesController.ts      # Extrae params, invoca UC, formatea respuesta
+│   │   └── routes/
+│   │       └── mensajesRoutes.ts          # Router Express con middlewares
+│   ├── types/
+│   │   └── express.d.ts                   # Augmentación: req.userId, req.userName
+│   └── index.ts                           # Bootstrap: wiring DI manual + servidor HTTP
+├── .github/
+│   └── workflows/
+│       └── deploy.yml                     # CI/CD: build TypeScript + Kudu ZIP deploy
+├── .env.example                           # Plantilla de variables de entorno
+├── package.json
+├── tsconfig.json
+└── README.md
+```
