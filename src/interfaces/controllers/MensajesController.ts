@@ -33,12 +33,13 @@ export class MensajesController {
         arrendatario_id,
       } = req.body;
 
-      // Validaciones básicas
-      if (!destinatario_id || !propiedad_id || !contenido || !arrendador_id || !arrendatario_id) {
-        res.status(400).json({
-          error: 'Campos requeridos: destinatario_id, propiedad_id, contenido, arrendador_id, arrendatario_id',
-        });
-        return;
+      // Validaciones básicas — se verifica tipo string para prevenir inyección NoSQL
+      const camposString = { destinatario_id, propiedad_id, contenido, arrendador_id, arrendatario_id };
+      for (const [campo, valor] of Object.entries(camposString)) {
+        if (!valor || typeof valor !== 'string') {
+          res.status(400).json({ error: `Campo requerido y debe ser string: ${campo}` });
+          return;
+        }
       }
 
       if (contenido.trim().length === 0) {
@@ -76,8 +77,10 @@ export class MensajesController {
         arrendatario_id,
       });
 
-      // Emitir evento en tiempo real via WebSocket al destinatario
-      emitirNuevoMensaje(destinatario_id, {
+      // Emitir evento en tiempo real via WebSocket al destinatario.
+      // Se usa resultado.destinatario_id (derivado por el use case desde la conversación
+      // persistida) — nunca el destinatario_id del body, que podría ser falsificado.
+      emitirNuevoMensaje(resultado.destinatario_id, {
         mensaje_id: resultado.mensaje_id,
         conversacion_id: resultado.conversacion_id,
         remitente_id: resultado.remitente_id,
