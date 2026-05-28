@@ -3,7 +3,7 @@ name: Build & Deploy — ms-mensajes
 on:
   push:
     branches: [main]
-  workflow_dispatch:   # permite disparar manualmente desde GitHub Actions
+  workflow_dispatch:
 
 jobs:
   build-and-deploy:
@@ -26,15 +26,19 @@ jobs:
       - name: Compilar TypeScript
         run: npm run build
 
-      # Empaquetar solo lo necesario para producción:
-      # dist/ (JS compilado) + package.json + package-lock.json
-      # Azure instala las node_modules en el servidor con npm install --production
       - name: Empaquetar para deploy
         run: zip -r deploy.zip dist package.json package-lock.json
 
-      - name: Deploy a Azure App Service
-        uses: azure/webapps-deploy@v3
-        with:
-          app-name: ms-mensajes
-          publish-profile: ${{ secrets.AZURE_PUBLISH_PROFILE_MS_MENSAJES }}
-          package: deploy.zip
+      - name: Deploy a Azure App Service via Kudu ZIP API
+        env:
+          KUDU_CREDENTIALS: ${{ secrets.KUDU_CREDENTIALS_MS_MENSAJES }}
+        run: |
+          curl -X POST \
+            "https://ms-mensajes.scm.azurewebsites.net/api/zipdeploy?isAsync=false" \
+            -u "$KUDU_CREDENTIALS" \
+            -H "Content-Type: application/zip" \
+            --data-binary @deploy.zip \
+            --fail \
+            --show-error \
+            --silent \
+            -w "\nHTTP status: %{http_code}\n"
